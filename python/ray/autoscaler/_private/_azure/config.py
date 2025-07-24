@@ -199,15 +199,14 @@ def _configure_key_pair(config):
     # Validate that the user either specfied both keys or none, but not just one
     if user_specified_private_key != user_specified_public_key:
         if user_specified_private_key:
-            raise ValueError(
-                "ssh_private_key is specified but ssh_public_key is missing. "
-                "Both SSH key paths must be specified together, or omit both from your config to use auto-generated keys."
-            )
+            missing_key, specified_key = "ssh_public_key", "ssh_private_key"
         else:
-            raise ValueError(
-                "ssh_public_key is specified but ssh_private_key is missing. "
-                "Both SSH key paths must be specified together, or omit both from your config to use auto-generated keys."
-            )
+            missing_key, specified_key = "ssh_private_key", "ssh_public_key"
+        raise ValueError(
+            f"{specified_key} is specified but {missing_key} is missing. "
+            "Both SSH key paths must be specified together, or omit both from "
+            "your config to use auto-generated keys."
+        )
 
     private_key_path = Path(
         config["auth"].get("ssh_private_key", "~/.ssh/id_rsa")
@@ -216,30 +215,13 @@ def _configure_key_pair(config):
         config["auth"].get("ssh_public_key", "~/.ssh/id_rsa.pub")
     ).expanduser()
 
-    # If user specified both keys in config, validate they exist
-    if user_specified_private_key and user_specified_public_key:
-        nonexistent_keys = []
-        if user_specified_private_key and not private_key_path.is_file():
-            nonexistent_keys.append(f"ssh_private_key: {private_key_path}")
-        if user_specified_public_key and not public_key_path.is_file():
-            nonexistent_keys.append(f"ssh_public_key: {public_key_path}")
+    # Determine if we need to generate keys. This happens if keys are not
+    # user-specified and at least one is missing from the default path.
+    should_generate_keys = not (
+        user_specified_private_key and user_specified_public_key
+    ) and (not private_key_path.is_file() or not public_key_path.is_file())
 
-        if nonexistent_keys:
-            raise ValueError(
-                "SSH key files from config do not exist: {}. "
-                "Please create the keys or remove the custom paths from your config "
-                "to use auto-generated keys.".format(", ".join(nonexistent_keys))
-            )
-
-        logger.info(
-            "Using specified SSH keys from config: {} and {}".format(
-                private_key_path, public_key_path
-            )
-        )
-        with open(public_key_path, "r") as f:
-            public_key = f.read()
-    # Only generate keys if we defaulted key paths and either don't exist
-    elif not private_key_path.is_file() or not public_key_path.is_file():
+    if should_generate_keys:
         logger.info(
             "Generating new SSH key pair at {} and {}".format(
                 private_key_path, public_key_path
@@ -261,18 +243,43 @@ def _configure_key_pair(config):
             format=serialization.PrivateFormat.TraditionalOpenSSL,
             encryption_algorithm=serialization.NoEncryption(),
         ).decode("utf-8")
-        with open(private_key_path, "w") as f:
+        with open(
+            private_key_path,
+            "w",
+            opener=lambda path, flags: os.open(path, flags, 0o600),
+        ) as f:
             f.write(pem)
-        os.chmod(private_key_path, 0o600)
         with open(public_key_path, "w") as f:
             f.write(public_key)
-    # We defaulted key paths and keys exist
     else:
-        logger.info(
-            "Using existing SSH keys: {} and {}".format(
-                private_key_path, public_key_path
+        # Using existing keys (either user-specified or default).
+        if user_specified_private_key and user_specified_public_key:
+            # Validate that user-specified keys exist.
+            missing_keys = []
+            if not private_key_path.is_file():
+                missing_keys.append(f"ssh_private_key: {private_key_path}")
+            if not public_key_path.is_file():
+                missing_keys.append(f"ssh_public_key: {public_key_path}")
+
+            if missing_keys:
+                raise ValueError(
+                    "SSH key files from config do not exist: {}. "
+                    "Please create the keys or remove the custom paths from your config "
+                    "to use auto-generated keys.".format(", ".join(missing_keys))
+                )
+            logger.info(
+                "Using specified SSH keys from config: {} and {}".format(
+                    private_key_path, public_key_path
+                )
             )
-        )
+        else:
+            # Using existing keys at default paths.
+            logger.info(
+                "Using existing SSH keys: {} and {}".format(
+                    private_key_path, public_key_path
+                )
+            )
+
         with open(public_key_path, "r") as f:
             public_key = f.read()
 
