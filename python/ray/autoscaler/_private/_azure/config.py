@@ -226,7 +226,7 @@ def _configure_key_pair(config):
 
         if nonexistent_keys:
             raise ValueError(
-                "SSH key files from config do not exist {}. "
+                "SSH key files from config do not exist: {}. "
                 "Please create the keys or remove the custom paths from your config "
                 "to use auto-generated keys.".format(", ".join(nonexistent_keys))
             )
