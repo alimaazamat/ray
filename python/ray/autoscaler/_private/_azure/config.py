@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import random
 from hashlib import sha256
 from pathlib import Path
@@ -9,6 +10,10 @@ from azure.common.credentials import get_cli_profile
 from azure.identity import AzureCliCredential
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.resource.resources.models import DeploymentMode
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 UNIQUE_ID_LEN = 4
 
@@ -181,22 +186,97 @@ def _configure_resource_group(config):
 
 
 def _configure_key_pair(config):
+    """
+    Configure SSH keypair, generate one automatically if keypair is not specified and does not exist.
+    """
     ssh_user = config["auth"]["ssh_user"]
-    public_key = None
-    # search if the keys exist
-    for key_type in ["ssh_private_key", "ssh_public_key"]:
-        try:
-            key_path = Path(config["auth"][key_type]).expanduser()
-        except KeyError:
-            raise Exception("Config must define {}".format(key_type))
-        except TypeError:
-            raise Exception("Invalid config value for {}".format(key_type))
 
-        assert key_path.is_file(), "Could not find ssh key: {}".format(key_path)
+    # Check if user specified custom SSH key paths
+    user_specified_private_key = "ssh_private_key" in config["auth"]
+    user_specified_public_key = "ssh_public_key" in config["auth"]
 
-        if key_type == "ssh_public_key":
-            with open(key_path, "r") as f:
-                public_key = f.read()
+    # Validate that user specified both keys in config
+    if user_specified_private_key != user_specified_public_key:
+        if user_specified_private_key:
+            raise ValueError(
+                "ssh_private_key is specified but ssh_public_key is missing. "
+                "Both SSH key paths must be specified together, or omit both from your config to use auto-generated keys."
+            )
+        else:
+            raise ValueError(
+                "ssh_public_key is specified but ssh_private_key is missing. "
+                "Both SSH key paths must be specified together, or omit both from your config to use auto-generated keys."
+            )
+
+    private_key_path = Path(
+        config["auth"].get("ssh_private_key", "~/.ssh/id_rsa")
+    ).expanduser()
+    public_key_path = Path(
+        config["auth"].get("ssh_public_key", "~/.ssh/id_rsa.pub")
+    ).expanduser()
+
+    # If user specified both keys in config, validate they exist
+    if user_specified_private_key and user_specified_public_key:
+        nonexistent_keys = []
+        if user_specified_private_key and not private_key_path.is_file():
+            nonexistent_keys.append(f"ssh_private_key: {private_key_path}")
+        if user_specified_public_key and not public_key_path.is_file():
+            nonexistent_keys.append(f"ssh_public_key: {public_key_path}")
+
+        if nonexistent_keys:
+            raise ValueError(
+                "Specified SSH key files do not exist: {}. "
+                "Please create the keys or remove the custom paths from your config "
+                "to use auto-generated keys.".format(", ".join(nonexistent_keys))
+            )
+
+        logger.info(
+            "Using specified SSH keys from config: {} and {}".format(
+                private_key_path, public_key_path
+            )
+        )
+        with open(public_key_path, "r") as f:
+            public_key = f.read()
+    # Only generate keys if we defaulted key paths and either don't exist
+    elif not private_key_path.is_file() or not public_key_path.is_file():
+        logger.info(
+            "Generating new SSH key pair at {} and {}".format(
+                private_key_path, public_key_path
+            )
+        )
+        private_key_path.parent.mkdir(parents=True, exist_ok=True)
+        key = rsa.generate_private_key(
+            backend=default_backend(), public_exponent=65537, key_size=2048
+        )
+        public_key = (
+            key.public_key()
+            .public_bytes(
+                serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
+            )
+            .decode("utf-8")
+        )
+        pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+        with open(private_key_path, "w") as f:
+            f.write(pem)
+        os.chmod(private_key_path, 0o600)
+        with open(public_key_path, "w") as f:
+            f.write(public_key)
+    # We defaulted key paths and keys exist
+    else:
+        logger.info(
+            "Using existing SSH keys: {} and {}".format(
+                private_key_path, public_key_path
+            )
+        )
+        with open(public_key_path, "r") as f:
+            public_key = f.read()
+
+    config["auth"]["ssh_private_key"] = str(private_key_path)
+    config["auth"]["ssh_public_key"] = str(public_key_path)
 
     for node_type in config["available_node_types"].values():
         azure_arm_parameters = node_type["node_config"].setdefault(
