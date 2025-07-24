@@ -190,12 +190,13 @@ def _configure_key_pair(config):
     Configure SSH keypair, generate one automatically if keypair is not specified and does not exist.
     """
     ssh_user = config["auth"]["ssh_user"]
+    public_key = None
 
     # Check if user specified custom SSH key paths
     user_specified_private_key = "ssh_private_key" in config["auth"]
     user_specified_public_key = "ssh_public_key" in config["auth"]
 
-    # Validate that user specified both keys in config
+    # Validate that the user either specfied both keys or none, but not just one
     if user_specified_private_key != user_specified_public_key:
         if user_specified_private_key:
             raise ValueError(
@@ -225,7 +226,7 @@ def _configure_key_pair(config):
 
         if nonexistent_keys:
             raise ValueError(
-                "Specified SSH key files do not exist: {}. "
+                "SSH key files from config do not exist {}. "
                 "Please create the keys or remove the custom paths from your config "
                 "to use auto-generated keys.".format(", ".join(nonexistent_keys))
             )
