@@ -38,6 +38,7 @@
 #include "ray/util/container_util.h"
 #include "ray/util/env.h"
 #include "ray/util/event.h"
+#include "ray/util/path_utils.h"
 #include "ray/util/process.h"
 #include "ray/util/stream_redirection.h"
 #include "ray/util/stream_redirection_options.h"
@@ -170,7 +171,9 @@ std::shared_ptr<CoreWorker> CoreWorkerProcessImpl::CreateCoreWorker(
   }
 
   auto task_event_buffer = std::make_unique<worker::TaskEventBufferImpl>(
-      std::make_shared<gcs::GcsClient>(options.gcs_options));
+      std::make_unique<gcs::GcsClient>(options.gcs_options),
+      std::make_unique<rpc::EventAggregatorClientImpl>(options.metrics_agent_port,
+                                                       *client_call_manager));
 
   // Start the IO thread first to make sure the checker is working.
   boost::thread::attributes io_thread_attrs;
@@ -438,7 +441,8 @@ std::shared_ptr<CoreWorker> CoreWorkerProcessImpl::CreateCoreWorker(
         auto addr = core_worker->actor_task_submitter_->GetActorAddress(actor_id);
         RAY_CHECK(addr.has_value()) << "Actor address not found for actor " << actor_id;
         return core_worker->core_worker_client_pool_->GetOrConnect(addr.value());
-      });
+      },
+      gcs_client);
 
   auto on_excess_queueing = [this](const ActorID &actor_id, uint64_t num_queued) {
     auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(
@@ -634,7 +638,7 @@ CoreWorkerProcessImpl::CoreWorkerProcessImpl(const CoreWorkerOptions &options)
       }
       const std::string app_name = app_name_ss.str();
       const std::string log_filepath =
-          RayLog::GetLogFilepathFromDirectory(options_.log_dir, /*app_name=*/app_name);
+          GetLogFilepathFromDirectory(options_.log_dir, /*app_name=*/app_name);
       RayLog::StartRayLog(app_name,
                           RayLogLevel::INFO,
                           log_filepath,
@@ -718,6 +722,18 @@ CoreWorkerProcessImpl::CoreWorkerProcessImpl(const CoreWorkerOptions &options)
   // We need init stats before using it/spawning threads.
   stats::Init(global_tags, options_.metrics_agent_port, worker_id_);
 
+  // Initialize event framework before starting up worker.
+  if (RayConfig::instance().event_log_reporter_enabled() && !options_.log_dir.empty()) {
+    const std::vector<SourceTypeVariant> source_types = {
+        ray::rpc::Event_SourceType::Event_SourceType_CORE_WORKER,
+        ray::rpc::ExportEvent_SourceType::ExportEvent_SourceType_EXPORT_TASK};
+    RayEventInit(source_types,
+                 /*custom_fields=*/{},
+                 options_.log_dir,
+                 RayConfig::instance().event_level(),
+                 RayConfig::instance().emit_event_to_log_file());
+  }
+
   {
     // Notify that core worker is initialized.
     absl::Cleanup initialzed_scope_guard = [this] {
@@ -727,18 +743,6 @@ CoreWorkerProcessImpl::CoreWorkerProcessImpl(const CoreWorkerOptions &options)
     auto worker = CreateCoreWorker(options_, worker_id_);
     auto write_locked = core_worker_.LockForWrite();
     write_locked.Get() = worker;
-  }
-
-  // Initialize event framework.
-  if (RayConfig::instance().event_log_reporter_enabled() && !options_.log_dir.empty()) {
-    const std::vector<SourceTypeVariant> source_types = {
-        ray::rpc::Event_SourceType::Event_SourceType_CORE_WORKER,
-        ray::rpc::ExportEvent_SourceType::ExportEvent_SourceType_EXPORT_TASK};
-    RayEventInit(source_types,
-                 absl::flat_hash_map<std::string, std::string>(),
-                 options_.log_dir,
-                 RayConfig::instance().event_level(),
-                 RayConfig::instance().emit_event_to_log_file());
   }
 }
 
