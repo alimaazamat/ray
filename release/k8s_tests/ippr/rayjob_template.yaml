@@ -1,0 +1,135 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: {cluster_name}
+  annotations:
+    # IPPR configuration for worker groups
+    ray.io/ippr: >
+      {{
+        "groups": {{
+          "small-group": {{
+            "max-cpu": 14,
+            "max-memory": "20Gi",
+            "resize-timeout": 5
+          }}
+        }}
+      }}
+spec:
+  entrypoint: python /home/ray/benchmark/benchmark.py
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 60
+
+  rayClusterSpec:
+    rayVersion: '2.49.0'
+    enableInTreeAutoscaling: true
+    autoscalerOptions:
+      version: v2
+      upscalingMode: Default
+      idleTimeoutSeconds: 60
+      imagePullPolicy: IfNotPresent
+      securityContext: {{}}
+      env:
+      - name: AUTOSCALER_UPDATE_INTERVAL_S
+        value: "1"
+      envFrom: []
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+
+    headGroupSpec:
+      rayStartParams:
+        num-cpus: "0"
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: {ray_image}
+            env:
+            - name: RAY_memory_monitor_refresh_ms
+              value: "0"
+            - name: TEST_MODE
+              value: "{mode}"
+            - name: TPCH_SCALE_FACTOR
+              value: "10"
+            - name: NUM_RUNS
+              value: "1"
+            resources:
+              limits:
+                cpu: "2"
+                memory: "8Gi"
+              requests:
+                cpu: "0.25"
+                memory: "2Gi"
+            resizePolicy:
+            - resourceName: cpu
+              restartPolicy: NotRequired
+            - resourceName: memory
+              restartPolicy: NotRequired
+            ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 44217
+              name: as-metrics
+            - containerPort: 44227
+              name: dash-metrics
+            volumeMounts:
+            - mountPath: /home/ray/benchmark
+              name: benchmark-scripts
+          volumes:
+          - name: benchmark-scripts
+            configMap:
+              name: benchmark-{cluster_id}
+              items:
+              - key: benchmark.py
+                path: benchmark.py
+
+    workerGroupSpecs:
+    - replicas: 0
+      minReplicas: 0
+      maxReplicas: 3
+      groupName: small-group
+      rayStartParams: {{}}
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 1
+                podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                      - key: ray.io/group
+                        operator: In
+                        values:
+                          - small-group
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+          - name: ray-worker
+            image: {ray_image}
+            env:
+            - name: RAY_memory_monitor_refresh_ms
+              value: "0"
+            resources:
+              limits:
+                cpu: "{worker_cpu_limit}"
+                memory: "{worker_mem_limit}"
+              requests:
+                cpu: "7"
+                memory: "6Gi"
+            {resize_policy}
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: benchmark-{cluster_id}
+data:
+  benchmark.py: |
+{benchmark_script}

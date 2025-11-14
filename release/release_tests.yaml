@@ -3523,6 +3523,26 @@
     prepare: bash prepare.sh
     script: python run_gcs_ft_on_k8s.py
 
+- name: k8s_ippr_benchmark
+  group: k8s-test
+  working_dir: k8s_tests/ippr
+
+  stable: false
+
+  frequency: manual
+  team: core
+  cluster:
+    byod:
+      pip:
+        - kubernetes
+        - azure-cli
+    cluster_compute: driver_compute.yaml
+
+  run:
+    timeout: 7200  # 2h
+    prepare: bash prepare_ippr.sh
+    script: python run_ippr_benchmark.py
+
 - name: azure_cluster_launcher
   python: "3.10"
   group: cluster-launcher-test
