@@ -1,0 +1,176 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: tpch-q1-sf-10-baseline
+  # NO IPPR annotation
+spec:
+  entrypoint: python /home/ray/tpch/q1.py --sf 10
+  rayClusterSpec:
+    rayVersion: '2.51.1'
+    enableInTreeAutoscaling: true
+    autoscalerOptions:
+      env:
+      - name: AUTOSCALER_UPDATE_INTERVAL_S
+        value: "1"
+    headGroupSpec:
+      rayStartParams: {
+        "num-cpus": "0",
+      }
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: alimaa3amat/ray-ippr:2.51.1-py310-1
+            env:
+            - name: RAY_memory_monitor_refresh_ms
+              value: "0"
+            resources:
+              limits:
+                cpu: "2"
+                memory: "8Gi"
+              requests:
+                cpu: "0.25"
+                memory: "2Gi"
+            ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 44217
+              name: as-metrics
+            - containerPort: 44227
+              name: dash-metrics
+            volumeMounts:
+            - mountPath: /home/ray/tpch/
+              name: tpch1
+          volumes:
+          - name: tpch1
+            configMap:
+              name: tpch1-baseline
+              items:
+              - key: q1.py
+                path: q1.py
+    workerGroupSpecs:
+    - replicas: 0
+      minReplicas: 0
+      maxReplicas: 5
+      groupName: small-group
+      rayStartParams: {}
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 1
+                podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                      - key: ray.io/group
+                        operator: In
+                        values:
+                          - small-group
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+          - name: ray-worker
+            image: alimaa3amat/ray-ippr:2.51.1-py310-1
+            env:
+            - name: RAY_memory_monitor_refresh_ms
+              value: "0"
+            resources:
+              limits:
+                cpu: "8"
+                memory: "16Gi" #"8Gi"
+              requests:
+                cpu: "7"
+                memory: "5Gi"
+
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tpch1-baseline
+data:
+  q1.py: |
+    import argparse
+    from datetime import datetime, timedelta
+    from typing import Dict
+
+    import numpy as np
+    import pandas as pd
+
+    import ray
+    from ray.data.context import DataContext, ShuffleStrategy
+    from ray.data.aggregate import Count, Mean, Sum
+
+
+    def parse_args() -> argparse.Namespace:
+        parser = argparse.ArgumentParser(description="TPCH Q1")
+        parser.add_argument("--sf", choices=[1, 10, 100, 1000, 10000], type=int, default=10)
+        return parser.parse_args()
+
+
+    def main(args):
+        path = f"s3://ray-benchmark-data/tpch/parquet/sf{args.sf}/lineitem"
+        DataContext.get_current().shuffle_strategy = ShuffleStrategy.HASH_SHUFFLE
+
+        def benchmark_fn():
+            # The TPC-H queries are a widely used set of benchmarks to measure the
+            # performance of data processing systems. See
+            # https://examples.citusdata.com/tpch_queries.html.
+            ds = (
+                ray.data.read_parquet(path)
+                # We filter using `map_batches` rather than `filter` because we can't
+                # express the date filter using the `expr` syntax.
+                .map_batches(filter_shipdate, batch_format="pandas")
+                .map_batches(compute_disc_price)
+                .map_batches(compute_charge)
+                .groupby(["column08", "column09"])  # l_returnflag, l_linestatus
+                .aggregate(
+                    Sum(on="column04", alias_name="sum_qty"),  # l_quantity
+                    Sum(on="column05", alias_name="sum_base_price"),  # l_extendedprice
+                    Sum(on="disc_price", alias_name="sum_disc_price"),
+                    Sum(on="charge", alias_name="sum_charge"),
+                    Mean(on="column04", alias_name="avg_qty"),  # l_quantity
+                    Mean(on="column05", alias_name="avg_price"),  # l_extendedprice
+                    Mean(on="column06", alias_name="avg_disc"),  # l_discount
+                    Count(),
+                )
+                .sort(["column08", "column09"])  # l_returnflag, l_linestatus
+                .materialize()
+            )
+            print(ds.stats())
+
+            # Report arguments for the benchmark.
+            return vars(args)
+
+        benchmark_fn()
+
+
+    def filter_shipdate(
+        batch: pd.DataFrame,
+        target_date=datetime.strptime("1998-12-01", "%Y-%m-%d").date() - timedelta(days=90),
+    ) -> pd.DataFrame:
+        return batch[batch["column10"] <= target_date]
+
+
+    def compute_disc_price(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        # l_extendedprice (column05) * (1 - l_discount (column06))
+        batch["disc_price"] = batch["column05"] * (1 - batch["column06"])
+        return batch
+
+
+    def compute_charge(batch):
+        # l_extendedprice (column05) * (1 - l_discount (column06)) * (1 + l_tax (column07))
+        batch["charge"] = (
+            batch["column05"] * (1 - batch["column06"]) * (1 + batch["column07"])
+        )
+        return batch
+
+
+    args = parse_args()
+    main(args)
+    main(args)
+    main(args)

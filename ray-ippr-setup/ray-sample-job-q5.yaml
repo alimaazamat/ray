@@ -1,0 +1,159 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: tpch-q5-sf-10
+  annotations:
+    ray.io/ippr: >
+      {
+        "groups": {
+          "small-group": {
+            "max-cpu": 22,
+            "max-memory": "22Gi",
+            "resize-timeout": 5
+          }
+        }
+      }
+spec:
+  entrypoint: python /home/ray/tpch/q5.py --sf 10
+  rayClusterSpec:
+    rayVersion: '2.51.1'
+    enableInTreeAutoscaling: true
+    autoscalerOptions:
+      env:
+      - name: AUTOSCALER_UPDATE_INTERVAL_S
+        value: "1"
+    headGroupSpec:
+      rayStartParams: {
+        "num-cpus": "0",
+      }
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: alimaa3amat/ray-ippr:2.51.1-py310-1
+            env:
+            - name: RAY_memory_monitor_refresh_ms
+              value: "0"
+            resources:
+              limits:
+                cpu: "2"
+                memory: "8Gi"
+              requests:
+                cpu: "0.25"
+                memory: "2Gi"
+            ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 44217
+              name: as-metrics
+            - containerPort: 44227
+              name: dash-metrics
+            volumeMounts:
+            - mountPath: /home/ray/tpch
+              name: tpch
+          volumes:
+          - name: tpch
+            configMap:
+              name: tpch-q5
+              items:
+              - key: q5.py
+                path: q5.py
+    workerGroupSpecs:
+    - replicas: 0
+      minReplicas: 0
+      maxReplicas: 2
+      groupName: small-group
+      rayStartParams: {}
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 1
+                podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                      - key: ray.io/group
+                        operator: In
+                        values:
+                          - small-group
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+          - name: ray-worker
+            image: alimaa3amat/ray-ippr:2.51.1-py310-1
+            env:
+            - name: RAY_memory_monitor_refresh_ms
+              value: "0"
+            resources:
+              limits:
+                cpu: "8"
+                memory: "8Gi"
+              requests:
+                cpu: "7"
+                memory: "6Gi"
+
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tpch-q5
+data:
+  q5.py: |
+    import argparse
+    from datetime import datetime
+    import time
+    import ray
+    from ray.data.context import DataContext, ShuffleStrategy
+    from ray.data.aggregate import Sum
+
+    def parse_args() -> argparse.Namespace:
+        parser = argparse.ArgumentParser(description="TPCH Q5")
+        parser.add_argument("--sf", choices=[1, 10, 100, 1000, 10000], type=int)
+        return parser.parse_args()
+
+    def main(args):
+        t1 = time.time()
+        base_path = f"s3://ray-benchmark-data/tpch/parquet/sf{args.sf}"
+        DataContext.get_current().shuffle_strategy = ShuffleStrategy.HASH_SHUFFLE
+        customer = ray.data.read_parquet(f"{base_path}/customer").rename_columns({"column0": "c_custkey", "column3": "c_nationkey"}).select_columns(["c_custkey", "c_nationkey"])
+        orders = ray.data.read_parquet(f"{base_path}/orders").rename_columns({"column0": "o_orderkey", "column1": "o_custkey", "column4": "o_orderdate"}).select_columns(["o_orderkey", "o_custkey", "o_orderdate"]).filter(
+            lambda x: datetime(1994, 1, 1).date() <= x["o_orderdate"] < datetime(1995, 1, 1).date()
+        )
+        lineitem = ray.data.read_parquet(f"{base_path}/lineitem").rename_columns({"column00": "l_orderkey", "column02": "l_suppkey", "column05": "l_extendedprice", "column06": "l_discount"}).select_columns(["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"])
+        supplier = ray.data.read_parquet(f"{base_path}/supplier").rename_columns({"column0": "s_suppkey", "column3": "s_nationkey"}).select_columns(["s_suppkey", "s_nationkey"])
+        nation = ray.data.read_parquet(f"{base_path}/nation").rename_columns({"column0": "n_nationkey", "column1": "n_name", "column2": "n_regionkey"}).select_columns(["n_nationkey", "n_name", "n_regionkey"])
+        region = ray.data.read_parquet(f"{base_path}/region").rename_columns({"column0": "r_regionkey", "column1": "r_name"}).select_columns(["r_regionkey", "r_name"])
+        customer_nation = customer.join(nation.drop_columns(["n_regionkey"]), join_type="inner", num_partitions=4, on=("c_nationkey",), right_on=("n_nationkey",))
+        orders_customer = orders.join(customer_nation, join_type="inner", num_partitions=4, on=("o_custkey",), right_on=("c_custkey",))
+        orders_lineitem = orders_customer.join(lineitem, join_type="inner", num_partitions=8, on=("o_orderkey",), right_on=("l_orderkey",))
+        supplier_nation = supplier.join(nation, join_type="inner", num_partitions=4, on=("s_nationkey",), right_on=("n_nationkey",))
+        supplier_nation_region = supplier_nation.join(region, join_type="inner", num_partitions=4, on=("n_regionkey",), right_on=("r_regionkey",))
+        final_join = orders_lineitem.join(supplier_nation_region.drop_columns(["n_name"]), join_type="inner", num_partitions=4, on=("l_suppkey",), right_on=("s_suppkey",))
+        final_join = final_join.filter(expr="c_nationkey == s_nationkey").filter(expr="r_name == 'ASIA'")
+        final_join = final_join.map_batches(
+            lambda df: df.assign(revenue=df["l_extendedprice"] * (1 - df["l_discount"])),
+            batch_format="pandas"
+        )
+        result = (
+            final_join.groupby("n_name")
+            .aggregate(Sum("revenue"))
+            .sort("sum(revenue)", descending=True)
+            .materialize()
+        )
+        print("Top 10 results:")
+        print(result.take(10))
+        print(result.stats())
+        ts2 = time.time()
+        print("Execution time:", ts2 - t1)
+        # Report arguments for the benchmark.
+        return ts2 - t1
+
+    args = parse_args()
+    main(args)
+    main(args)
+    main(args)
