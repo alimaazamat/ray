@@ -1,86 +1,29 @@
-# Ray on Azure Kubernetes Service: Multi-Tenant ML Platform with In-Place Pod Resize
+# IPPR for Multi-Tenant KubeRay on AKS
 
-## The Scenario
+## Scenario
 
-A company runs a **multi-tenant Kubernetes cluster on AKS** for AI/ML workloads using **Ray with KubeRay**.
+An e-commerce company runs a multi-tenant ML platform on AKS where teams share one cluster:
 
-**Customer Use Case**:
-An e-commerce company runs a shared ML platform where multiple teams share one AKS cluster. The **Search Team**
-uses the CLIP model to power product search (customers type "red summer dress" and see matching products). The
-**Catalog Team** uses ResNet50 to automatically categorize newly uploaded product images into departments. The
-**ML Engineering Team** continuously fine-tunes both models using Ray Train on new product data, while the
-**Analytics Team** runs overnight Ray Data pipelines to process thousands of images and generate embeddings for
-recommendations. All teams compete for the same cluster resources.
+- **Ray Serve**: CLIP (image search) and ResNet50 (product categorization) APIs running 24/7
+- **Ray Train**: Fine-tuning jobs 3x/day on new product data
+- **Ray Data**: Overnight batch inference pipelines
 
-- **Search Team**: Ray Serve running CLIP model for image-text search API
-- **Catalog Team**: Ray Serve running ResNet50 for product classification API
-- **ML Engineering Team**: Ray Train jobs fine-tuning models 3x/day
-- **Analytics Team**: Ray Data batch inference pipelines running overnight
-
-**Challenge**: Multiple teams share a cluster and compete for resources, how to efficiently utilize resources?
-
-## What This Cluster Does
-
-**Purpose**: AI-powered image analysis platform serving production APIs and running ML jobs
-
-**Workloads**:
-
-- **Serving (Ray Serve)**: CLIP and ResNet50 models provide 24/7 image search and classification APIs
-- **Training (Ray Train)**: Fine-tune models 3x/day on new customer images
-- **Batch Inference (Ray Data)**: Process uploaded images in bulk overnight
-
-**Challenge**: All workloads share one cluster and compete for resources
+**Challenge**: Workloads have variable resource needs but static pod sizing forces choosing between waste or insufficient capacity
 
 ## The Problem: Static Pod Sizing
 
 **Without IPPR**, pods are statically sized:
 
-### Size pods too big → **Waste resources**
+**Size too large** → Waste resources:
+- Serving pod: Peak 18 CPU, off-peak 6 CPU → **Waste 12 CPU**
+- Training pod: Varies 6-12 CPU by phase → **Waste up to 6 CPU**
+- Batch pod: Varies 6-10 CPU by stage → **Waste up to 4 CPU**
 
-If you size a pod for maximum utilization you end up underutilizing resources at off peak hours.
+**Size too small** → Failed workloads:
+- Peak traffic throttles serving pods → High latency, failures
+- Training/batch jobs OOM killed → Must retry
 
-Serving pod (Ray Serve) sized for peak traffic:
-
-- At peak using 18 CPU -> Off peak using 6 CPU
-- Result: Waste 12 CPU
-
-Training pod (Ray Train) sized for training phase:
-
-- Data loading using 6 CPU -> Training is at peak using 12 CPU -> Validation using 8 CPU
-- Result: Waste 6 CPU + 4 CPU
-
-Batch pod (Ray Data) sized for inference phase:
-
-- Read from storage using 6 CPU -> Inference is at peak using 10 CPU -> Write results using 6 CPU
-- Result: Waste 4 CPU + 4 CPU
-
-### Size pods too small → **Can't handle load**
-
-Serving pod (Ray Serve) under-sized:
-
-- Peak traffic arrives → Pod CPU throttled
-- Result: High latency, request failures
-
-Training pod (Ray Train) under-sized:
-
-- Training phase → OOM killed
-- Result: Job fails, must retry
-
-Batch pod (Ray Data) under-sized:
-
-- Inference phase → OOM killed
-- Result: Job fails, must retry
-
-### Over-provision cluster → **More Expensive**
-
-Using a bigger cluster to fit all pods at peak size
-
-- Serving (Ray Serve): 18 CPU (peak)
-- Training (Ray Train): 12 CPU (peak)
-- Batch (Ray Data): 10 CPU (peak)
-- Total: 40 CPU needed
-AKS cluster: 4 nodes × Standard_D8s_v3 = $1,110/month
-
+**Result**: Need 4-node cluster (32 vCPU) at **$1,110/month** but still can't run all workloads simultaneously
 ## The Solution: IPPR Enables Dynamic Right-Sizing
 
 **With IPPR** (In-Place Pod Resize), pods can **size up and down** dynamically:
@@ -187,25 +130,3 @@ Batch pod (Ray Data) adapts to pipeline stage:
 | Batch jobs/night     | 1                | 2-3              | **+200% throughput** |
 | Queue time (avg)     | 2-4 hours        | 0 minutes        | **Eliminated**       |
 
-## Directory
-
-```text
-ippr-demo/
-├── setup/
-│   └── install-kuberay.sh     # KubeRay operator setup
-├── serving/
-│   ├── clip-serve.yaml        # Ray Serve: CLIP model
-│   └── resnet-serve.yaml      # Ray Serve: ResNet50
-├── training/
-│   ├── finetune-clip.yaml     # Ray Train: Fine-tuning
-│   └── train_code.py          # Training script
-└── batch/
-    ├── batch-inference.yaml   # Ray Data: Batch pipeline
-    └── inference_code.py      # Inference script
-```
-
----
-
-**Theme**: Running a multi-tenant ML platform on AKS requires flexible resource management. IPPR enables pods to
-size up and down dynamically, allowing **better resource utilization** and **better job completion** across training,
-serving, and batch workloads. This is the future of cost-efficient ML infrastructure on Kubernetes.
