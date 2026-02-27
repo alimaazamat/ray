@@ -27,7 +27,7 @@ On multi-tenant AKS clusters, serving and training workloads have naturally comp
 
 Without IPPR, each workload reserves its peak around the clock — Serving at 16, Training at 10, Batch at 8 — totaling 34 CPU no matter the time. With IPPR, each line rises and falls independently: Serving scales up during business hours, Training spikes during compute phases, and Batch fills in overnight. The shaded region is the gap between what static sizing pays for and what the cluster actually needs.
 
-Using Standard_D8s_v3 nodes (8 vCPU, 32 GiB each) as an example, static sizing requires 5 nodes to cover 34 CPU of peak reservations (~$1,387/month). With IPPR, the cluster peaks at 24 CPU and fits on 3 nodes (~$832/month) — a savings of ~$555/month by letting resource allocation track demand instead of worst-case planning.
+Using [Standard_D8s_v3](https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/) nodes (8 vCPU, 32 GiB, ~$280/month each) as an example, static sizing requires 5 nodes to cover 34 CPU of peak reservations (~$1,402/month). With IPPR, the cluster peaks at 24 CPU and fits on 3 nodes (~$841/month) — a savings of ~$561/month by letting resource allocation track demand instead of worst-case planning. For an enterprise running dozens of multi-tenant Ray clusters across development, staging, and production environments, those per-cluster savings compound into meaningful reductions in monthly AKS spend.
 
 ### Faster task scheduling through vertical scale-up
 
