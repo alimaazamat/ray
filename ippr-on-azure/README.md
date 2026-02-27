@@ -1,132 +1,81 @@
-# IPPR for Multi-Tenant KubeRay on AKS
+# Vertical autoscaling for multi-tenant Ray on AKS with IPPR
 
-## Scenario
+Ray is one of the most widely adopted frameworks for distributed AI/ML workloads, and AKS is a natural home for production Ray clusters. As organizations scale their ML platforms, a common pattern emerges: multiple teams sharing AKS infrastructure for serving, training, and batch inference — each with different resource needs that change throughout the day.
 
-An e-commerce company runs a multi-tenant ML platform on AKS where teams share one cluster:
+With [in-place pod resize](https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/) now GA in Kubernetes 1.35, we are integrating vertical scaling capabilities into the Ray Autoscaler v2 for KubeRay on AKS. By scaling pods vertically before scaling horizontally, IPPR enables multi-tenant clusters to run the same workloads on fewer nodes with higher utilization.
 
-- **Ray Serve**: CLIP (image search) and ResNet50 (product categorization) APIs running 24/7
-- **Ray Train**: Fine-tuning jobs 3x/day on new product data
-- **Ray Data**: Overnight batch inference pipelines
+## The cost of static sizing on AKS
 
-**Challenge**: Workloads have variable resource needs but static pod sizing forces choosing between waste or insufficient capacity
+ML workloads on AKS have a well-known inefficiency: pods must be sized for peak demand at creation and hold those resources for their entire lifetime. On a typical multi-tenant cluster running Ray Serve, Ray Train, and Ray Data, this means a significant portion of reserved compute sits idle — workloads rarely sustain peak demand continuously, but their resource allocations do.
 
-## The Problem: Static Pod Sizing
+The challenge is that traditional approaches to improving utilization each carry tradeoffs that outweigh the potential savings:
 
-**Without IPPR**, pods are statically sized:
+- **Pod restarts** to resize containers drop live connections on Ray Serve endpoints and lose in-progress training state.
+- **Horizontal scaling** with new pods takes 30–60 seconds for scheduling, image pulls, and Ray cluster membership — too slow for real-time serving spikes.
+- **Manual coordination** between teams to share capacity doesn't scale beyond a handful of workloads.
+- **Adding more nodes** increases cost rather than reducing it.
 
-**Size too large** → Waste resources:
-- Serving pod: Peak 18 CPU, off-peak 6 CPU → **Waste 12 CPU**
-- Training pod: Varies 6-12 CPU by phase → **Waste up to 6 CPU**
-- Batch pod: Varies 6-10 CPU by stage → **Waste up to 4 CPU**
+These tradeoffs mean that improvements in utilization go unrealized — not because they are small, but because the path to achieving them has been too disruptive. In-place pod resize removes that barrier entirely.
 
-**Size too small** → Failed workloads:
-- Peak traffic throttles serving pods → High latency, failures
-- Training/batch jobs OOM killed → Must retry
+## How IPPR improves multi-tenant Ray on AKS
 
-**Result**: Need 4-node cluster (32 vCPU) at **$1,110/month** but still can't run all workloads simultaneously
-## The Solution: IPPR Enables Dynamic Right-Sizing
+In-place pod resize (IPPR) enables the Ray Autoscaler v2 to dynamically adjust a pod's CPU and memory allocation without restarting the container. This unlocks vertical scaling as a first-class capability alongside the existing horizontal scaling in Ray.
 
-**With IPPR** (In-Place Pod Resize), pods can **size up and down** dynamically:
+On multi-tenant AKS clusters, serving and training workloads have naturally complementary resource patterns. Serving demand peaks during business hours and drops overnight, while training and batch workloads fill the inverse pattern. IPPR lets the cluster exploit this relationship:
 
-Serving pod (Ray Serve) adapts to traffic:
+```
+  CPU Committed Over 24 Hours
+  █ IPPR (actual demand)   ░ Saved vs static sizing (34 CPU)
+         ┌──────────────────────────────────┐ ← 34 CPU (static)
+  12 AM  │██████████████░░░░░░░░░░░░░░░░░░░░│  14 CPU      20 saved
+   2 AM  │██████████████░░░░░░░░░░░░░░░░░░░░│  14 CPU      20 saved
+   4 AM  │████████████░░░░░░░░░░░░░░░░░░░░░░│  12 CPU      22 saved
+   6 AM  │██████████░░░░░░░░░░░░░░░░░░░░░░░░│  10 CPU      24 saved
+   8 AM  │██████████████████░░░░░░░░░░░░░░░░│  18 CPU      16 saved
+  10 AM  │████████████████████████░░░░░░░░░░│  24 CPU      10 saved
+  12 PM  │████████████████████░░░░░░░░░░░░░░│  20 CPU      14 saved
+   2 PM  │██████████████████████░░░░░░░░░░░░│  22 CPU      12 saved
+   4 PM  │████████████████████░░░░░░░░░░░░░░│  20 CPU      14 saved
+   6 PM  │████████████████████░░░░░░░░░░░░░░│  20 CPU      14 saved
+   8 PM  │██████████████░░░░░░░░░░░░░░░░░░░░│  14 CPU      20 saved
+  10 PM  │██████████████░░░░░░░░░░░░░░░░░░░░│  14 CPU      20 saved
+         └──────────────────────────────────┘
+                              Avg: 17 CPU saved per hour (50% reduction)
+```
 
-- Peak hours (8am-8pm):   18 CPU ← IPPR sized up
-- Off-peak (8pm-8am):     10 CPU ← IPPR sized down
+Without IPPR, every workload reserves its peak allocation around the clock — 16 + 10 + 8 = 34 CPU committed continuously, requiring 5 nodes. With IPPR, actual allocation averages 17 CPU and peaks at 24, fitting on 3 nodes. The ░ region above represents the CPU that static sizing pays for but never uses — an average of **17 CPU wasted every hour of every day**.
 
-Training pod (Ray Train) adapts to phase:
+### Faster task scheduling through vertical scale-up
 
-- Data loading (10 min):   6 CPU ← IPPR sized for I/O
-- Training (30 min):      12 CPU ← IPPR sized for compute
-- Validation (5 min):      8 CPU ← IPPR sized down
+When the Ray Autoscaler detects pending tasks that cannot be placed on existing capacity, it can resize IPPR-enabled pods in seconds — significantly faster than the minutes required to provision a new AKS node. This is particularly impactful for serving workloads where traffic spikes are immediate and latency-sensitive.
 
-Batch pod (Ray Data) adapts to pipeline stage:
+### Improved bin-packing and resource utilization
 
-- Read from storage (15 min):  6 CPU ← IPPR sized for I/O
-- Inference (30 min):         10 CPU ← IPPR sized for compute
-- Write results (15 min):      6 CPU ← IPPR sized for I/O
+IPPR-enabled pods start with smaller resource requests, allowing the Kubernetes scheduler to bin-pack more pods onto existing nodes. As workload demand grows, pods scale up in-place using available node capacity. This reduces fragmentation and improves overall node utilization compared to static sizing.
 
-## Cluster Configuration
+### Zero-disruption resizing for stateful workloads
 
-### Without IPPR (Static Sizing)
+Unlike pod restarts or rolling updates, IPPR resizes containers without interrupting running processes. For Ray workloads, this means:
 
-**AKS Cluster**:
+- **Ray Serve**: No dropped HTTP connections during resize. Inference endpoints remain available throughout scaling events.
+- **Ray Train**: No lost training progress. Models mid-epoch retain their checkpoints and continue without interruption.
+- **Ray Data**: No broken pipeline stages. Batch jobs reading from Azure Blob Storage maintain their I/O state.
 
-- **SKU**: 4 × Standard_D8s_v3 nodes (8 vCPU, 32 GiB each)
-- **Total**: 32 vCPU, 128 GiB
-- **Cost**: $0.38/hour/node × 4 = $1,110/month
+### Reduced node count through smarter capacity planning
 
-**Ray Clusters & Pods** (sized for peak):
+When new worker pods are needed for IPPR-enabled groups, the autoscaler considers their maximum capacity during bin-packing decisions. A single new AKS node can host a pod that starts small and grows into its allocation, rather than requiring a node large enough for peak demand from the start.
 
-1. **Multi-Model Serve Cluster** (CLIP + ResNet50)
-   - 1 head pod: 2 CPU, 4 GiB
-   - 2 worker pods: 8 CPU, 16 GiB each (static) = **16 CPU**
-   - Total: **18 CPU, 36 GiB**
+## How this translates to AKS cost
 
-2. **Training Job Cluster**
-   - 1 head pod: 2 CPU, 4 GiB
-   - 1 worker pod: 10 CPU, 24 GiB (static, sized for training phase)
-   - Total: **12 CPU, 28 GiB**
+To illustrate the impact, consider a multi-tenant AKS cluster running concurrent Ray Serve, Ray Train, and Ray Data workloads on Standard_D8s_v3 nodes (8 vCPU, 32 GiB each). With static sizing, each workload must reserve its peak CPU allocation at all times — even when actual demand is well below peak. With IPPR, pods start at their baseline and grow only when the autoscaler detects pending tasks that need more capacity.
 
-3. **Batch Inference Cluster**
-   - 1 head pod: 2 CPU, 4 GiB
-   - 1 worker pod: 8 CPU, 16 GiB (static, sized for inference phase)
-   - Total: **10 CPU, 20 GiB**
+In this type of scenario, the difference is straightforward: fewer nodes are needed because the cluster is no longer reserving peak capacity for every workload simultaneously. The Azure compute cost scales directly with the number of nodes, so any reduction in node count translates to proportional savings.
 
-**Peak if all run**: 18 + 12 + 10 = **40 CPU needed** (exceeds 32 vCPU capacity!)
+The actual savings depend on workload profiles, traffic patterns, and cluster configuration — but the structural advantage is clear: IPPR lets resource allocation track demand rather than worst-case planning.
 
-**Problem**: Can't run all workloads simultaneously. Serving consumes 18 CPU 24/7, leaving only 14 CPU for training
-(needs 12) OR batch (needs 10), but not both. Jobs must queue.
+## Looking ahead
 
-### With IPPR (Dynamic Sizing)
+We are continuing to expand IPPR capabilities for Ray on AKS. Future work includes proactive downsizing — automatically contracting pod resources when demand decreases — and GPU resource support. Together with AKS node autoscaling and the Ray Autoscaler v2, IPPR is a step toward Ray working seamlessly with Kubernetes as the infrastructure layer for distributed AI/ML.
 
-**AKS Cluster**:
-
-- **SKU**: 3 × Standard_D8s_v3 nodes (8 vCPU, 32 GiB each)
-- **Total**: 24 vCPU, 96 GiB
-- **Cost**: $0.38/hour/node × 3 = $822/month
-
-**Ray Clusters & Pods** (IPPR adjusts):
-
-1. **Multi-Model Serve Cluster** (CLIP + ResNet50)
-   - 1 head pod: 2 CPU, 4 GiB
-   - 2 worker pods: 4-8 CPU, 8-16 GiB each (IPPR resizes)
-   - Peak: **18 CPU, 36 GiB** | Off-peak: **10 CPU, 20 GiB** ← Frees 8 CPU!
-
-2. **Training Job Cluster**
-   - 1 head pod: 2 CPU, 4 GiB
-   - 1 worker pod: 4-10 CPU, 8-24 GiB (IPPR resizes by phase)
-   - Data loading: **6 CPU** | Training: **12 CPU** | Validation: **8 CPU**
-
-3. **Batch Inference Cluster**
-   - 1 head pod: 2 CPU, 4 GiB
-   - 1 worker pod: 4-8 CPU, 8-16 GiB (IPPR resizes by phase)
-   - I/O: **6 CPU** | Inference: **10 CPU** | I/O: **6 CPU**
-
-**Peak hours**: 18 CPU serving + 6 CPU training (data phase) = **24 CPU**
-
-**Off-peak**: 10 CPU serving + 12 CPU training = **22 CPU**
-
-**Benefit**: IPPR enables smaller cluster (24 vCPU vs 32 vCPU) with higher utilization
-
-## Cost Savings on AKS
-
-## Workload Resource Details
-
-**3 nodes × Standard_D8s_v3** (8 vCPU, 32 GiB each) = **24 vCPU total**
-**Cost**: $0.38/hour/node × 3 = **$1.14/hour** = **$822/month**
-
-### Workload Comparison
-
-| Metric               | Without IPPR     | With IPPR        | Improvement          |
-| -------------------- | ---------------- | ---------------- | -------------------- |
-| **Infrastructure**   |                  |                  |                      |
-| Nodes needed         | 4 nodes (32 CPU) | 3 nodes (24 CPU) | **-25% nodes**       |
-| Monthly cost         | $1,110           | $822             | **-$288/month**      |
-| **Utilization**      |                  |                  |                      |
-| Avg cluster CPU use  | 55%              | 80%              | **+45% utilization** |
-| Wasted CPU-hours/day | 192 CPU-hrs      | 64 CPU-hrs       | **-67% waste**       |
-| **Throughput**       |                  |                  |                      |
-| Training jobs/day    | 2-3 (queued)     | 5-6 (no queue)   | **+100% throughput** |
-| Batch jobs/night     | 1                | 2-3              | **+200% throughput** |
-| Queue time (avg)     | 2-4 hours        | 0 minutes        | **Eliminated**       |
+To learn more about Ray on Kubernetes, see the [KubeRay documentation](https://docs.ray.io/en/latest/cluster/kubernetes/index.html). To follow the IPPR implementation, see [PR #55961](https://github.com/ray-project/ray/pull/55961).
 
