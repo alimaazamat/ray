@@ -25,9 +25,9 @@ On multi-tenant AKS clusters, serving and training workloads have naturally comp
 
 ![CPU Allocation by Workload Over 24 Hours](cpu_allocation_chart.png)
 
-Without IPPR, each workload reserves its peak around the clock — Serving at 16, Training at 10, Batch at 8 — totaling 34 CPU no matter the time. With IPPR, each line rises and falls independently: Serving scales up during business hours, Training spikes during compute phases, and Batch fills in overnight. The shaded region is the gap between what static sizing pays for and what the cluster actually needs.
+Without IPPR, each workload must reserve its peak around the clock (Serving at 4, Training at 3, Batch at 3 giving a total of 10 CPU regardless of actual usage). With IPPR, resource allocation follows actual demand: Serving scales up during business hours while Training and Batch scale down, and overnight the pattern inverts. Because these workloads are naturally complementary, the cluster only needs enough capacity for the highest combined demand at any point in time — a peak of just 8 CPU. The shaded region shows the gap between what static sizing pays for and what the cluster actually needs.
 
-Using [Standard_D8s_v3](https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/) nodes (8 vCPU, 32 GiB, ~$280/month each) as an example, static sizing requires 5 nodes to cover 34 CPU of peak reservations (~$1,402/month). With IPPR, the cluster peaks at 24 CPU and fits on 3 nodes (~$841/month) — a savings of ~$561/month by letting resource allocation track demand instead of worst-case planning. For an enterprise running dozens of multi-tenant Ray clusters across development, staging, and production environments, those per-cluster savings compound into meaningful reductions in monthly AKS spend.
+Using [Standard_D8s_v3](https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/) nodes (8 vCPU, 32 GiB, ~$280/month each) as an example, static sizing requires 2 nodes to cover 10 CPU of peak reservations (~$561/month). With IPPR, the cluster peaks at 8 CPU and fits on 1 node (~$280/month) — a savings of ~$280/month (one full node) by letting resource allocation track demand instead of worst-case planning. At baseline (4.5 CPU), all pods fit on a single node. For enterprise customers running large multi-tenant Ray clusters, these per-cluster savings compound into meaningful reductions in monthly AKS spend.
 
 ### Faster task scheduling through vertical scale-up
 
@@ -57,3 +57,49 @@ As IPPR in KubeRay matures with capabilities like proactive downsizing (automati
 
 To learn more about Ray on Kubernetes, see the [KubeRay documentation](https://docs.ray.io/en/latest/cluster/kubernetes/index.html). To follow the IPPR implementation, see [PR #55961](https://github.com/ray-project/ray/pull/55961).
 
+## DEMO STEPS
+```bash
+kubectl delete raycluster ippr-multitenant-demo
+pkill -f "port-forward.*8265"
+kubectl apply -f demo/raycluster-ippr.yaml
+
+# port-forward to the head pod:
+HEAD_POD=$(kubectl get pods -l ray.io/cluster=ippr-multitenant-demo,ray.io/node-type=head -o name | sed 's|pod/||')
+kubectl port-forward pod/$HEAD_POD 8265:8265 &
+
+# submit all 3 workloads:
+ray job submit --address http://localhost:8265 --no-wait --working-dir . -- python workload_serve.py
+ray job submit --address http://localhost:8265 --no-wait --working-dir . -- python workload_train.py
+ray job submit --address http://localhost:8265 --no-wait --working-dir . -- python workload_batch.py
+
+# watch pods resize in-place:
+kubectl get pods -l ray.io/cluster=ippr-multitenant-demo \
+  -o custom-columns='NAME:.metadata.name,CPU_REQ:.spec.containers[0].resources.requests.cpu,CPU_LIM:.spec.containers[0].resources.limits.cpu' \
+  -w
+
+# results
+ippr-multitenant-demo-head-wqlzw                   500m         1
+ippr-multitenant-demo-serving-workers-worker-dcjwx    2         2
+ippr-multitenant-demo-training-workers-worker-6kr2h   1         1
+ippr-multitenant-demo-batch-workers-worker-5wbfg      1         1
+
+ippr-multitenant-demo-serving-workers-worker-dcjwx    4         4
+ippr-multitenant-demo-training-workers-worker-6kr2h   3         3
+ippr-multitenant-demo-batch-workers-worker-5wbfg      3         3
+```
+
+## DEMO RESULTS
+
+| Worker    | IPPR Start  | IPPR Resized To | Static (no IPPR) |
+| --------- | ----------- | --------------- | ---------------- |
+| serving   | 2 CPU       | **4 CPU**       | 4 CPU (fixed)    |
+| training  | 1 CPU       | **3 CPU**       | 3 CPU (fixed)    |
+| batch     | 1 CPU       | **3 CPU**       | 3 CPU (fixed)    |
+| head      | 0.5 CPU     | —               | 0.5 CPU          |
+| **Total** | **4.5 CPU** | **10.5 CPU**    | **10.5 CPU**     |
+
+| Metric               | Without IPPR (static) | With IPPR                    |
+| -------------------- | --------------------- | ---------------------------- |
+| CPU reserved at idle | 10.5 CPU              | 4.5 CPU                      |
+| Number of Nodes      | 2 (24/7)              | 1 (scales to 2 only at peak) |
+| **Node saved**       |                       | **1 node**                   |

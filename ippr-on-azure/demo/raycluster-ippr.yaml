@@ -1,0 +1,182 @@
+###############################################################################
+# RayCluster with IPPR (In-Place Pod Resize) for multi-tenant AKS demo
+#
+# 1 pod per worker group — clean IPPR with no partial resizes:
+#   - serving-workers:  1 pod × (2 CPU → 4 CPU)
+#   - training-workers: 1 pod × (1 CPU → 3 CPU)
+#   - batch-workers:    1 pod × (1 CPU → 3 CPU)
+#
+# Without IPPR (static):  4 + 3 + 3 + 0.5 (head) = 10.5 CPU → 2 nodes 24/7
+# With    IPPR (baseline): 2 + 1 + 1 + 0.5 (head) =  4.5 CPU → 1 node!
+# With    IPPR (peak):     4 + 3 + 3 + 0.5 (head) = 10.5 CPU → 2 nodes
+#
+# Cost savings: pods start small and resize only when demand hits.
+# In production with complementary workloads, peak demand is staggered
+# so you never need all 3 nodes at full capacity simultaneously.
+#
+# Prerequisites:
+#   - AKS cluster running Kubernetes >= 1.33 (IPPR GA in 1.35)
+#   - KubeRay operator built from PR #55961 (autoscaler-ippr branch)
+#   - 3× Standard_D8s_v3 nodes (8 vCPU / 32 GiB each)
+###############################################################################
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ippr-multitenant-demo
+  annotations:
+    ray.io/ippr: |
+      {
+        "groups": {
+          "serving-workers": {
+            "max-cpu": "4",
+            "max-memory": "4Gi",
+            "resize-timeout": 60
+          },
+          "training-workers": {
+            "max-cpu": "3",
+            "max-memory": "3Gi",
+            "resize-timeout": 60
+          },
+          "batch-workers": {
+            "max-cpu": "3",
+            "max-memory": "3Gi",
+            "resize-timeout": 60
+          }
+        }
+      }
+spec:
+  rayVersion: '2.48.0'
+  enableInTreeAutoscaling: true
+  autoscalerOptions:
+    upscalingMode: Default
+    idleTimeoutSeconds: 120
+    env:
+      - name: RAY_enable_autoscaler_v2
+        value: "1"
+  ############################
+  # Head node
+  ############################
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      num-cpus: '0'   # Head does not run workloads
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: alimaa3amat/ray-ippr:2.48.0-py310-1
+            env:
+              - name: RAY_enable_autoscaler_v2
+                value: "1"
+            ports:
+              - containerPort: 6379
+                name: gcs-server
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+            resources:
+              requests:
+                cpu: "500m"
+                memory: "2Gi"
+              limits:
+                cpu: "1"
+                memory: "4Gi"
+            lifecycle:
+              preStop:
+                exec:
+                  command: ["/bin/sh", "-c", "ray stop"]
+
+  ############################
+  # Worker group: Serving
+  ############################
+  workerGroupSpecs:
+    - groupName: serving-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams:
+        resources: "'{\"serving\": 1}'"   # Custom resource to pin tasks to this group
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: alimaa3amat/ray-ippr:2.48.0-py310-1
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: "2Gi"
+                limits:
+                  cpu: "2"
+                  memory: "2Gi"
+              resizePolicy:
+                - resourceName: cpu
+                  restartPolicy: NotRequired
+                - resourceName: memory
+                  restartPolicy: NotRequired
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["/bin/sh", "-c", "ray stop"]
+
+    ############################
+    # Worker group: Training
+    ############################
+    - groupName: training-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams:
+        resources: "'{\"training\": 1}'"   # Custom resource to pin tasks to this group
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: alimaa3amat/ray-ippr:2.48.0-py310-1
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "1Gi"
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+              resizePolicy:
+                - resourceName: cpu
+                  restartPolicy: NotRequired
+                - resourceName: memory
+                  restartPolicy: NotRequired
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["/bin/sh", "-c", "ray stop"]
+
+    ############################
+    # Worker group: Batch
+    ############################
+    - groupName: batch-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams:
+        resources: "'{\"batch\": 1}'"   # Custom resource to pin tasks to this group
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: alimaa3amat/ray-ippr:2.48.0-py310-1
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "1Gi"
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+              resizePolicy:
+                - resourceName: cpu
+                  restartPolicy: NotRequired
+                - resourceName: memory
+                  restartPolicy: NotRequired
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["/bin/sh", "-c", "ray stop"]
