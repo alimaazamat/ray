@@ -45,7 +45,7 @@ metadata:
         }
       }
 spec:
-  rayVersion: '2.48.0'
+  rayVersion: '2.56.0'
   enableInTreeAutoscaling: true
   autoscalerOptions:
     upscalingMode: Default
@@ -64,7 +64,7 @@ spec:
       spec:
         containers:
           - name: ray-head
-            image: alimaa3amat/ray-ippr:2.48.0-py310-1
+            image: rayproject/ray:2.56.0
             env:
               - name: RAY_enable_autoscaler_v2
                 value: "1"
@@ -101,7 +101,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: alimaa3amat/ray-ippr:2.48.0-py310-1
+              image: rayproject/ray:2.56.0
               resources:
                 requests:
                   cpu: "2"
@@ -132,7 +132,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: alimaa3amat/ray-ippr:2.48.0-py310-1
+              image: rayproject/ray:2.56.0
               resources:
                 requests:
                   cpu: "1"
@@ -163,7 +163,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: alimaa3amat/ray-ippr:2.48.0-py310-1
+              image: rayproject/ray:2.56.0
               resources:
                 requests:
                   cpu: "1"
