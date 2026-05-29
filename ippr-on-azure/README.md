@@ -2,7 +2,7 @@
 
 Ray is one of the most widely adopted frameworks for distributed AI/ML workloads especially on AKS. As organizations scale their ML platforms, a common problem emerges where multiple teams sharing an AKS cluster for multitenant needs (serving, training, and batch inference) each have different resource needs that change throughout the day.
 
-With [in-place pod resize](https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/) now GA in Kubernetes 1.35, we are integrating vertical scaling capabilities into the Ray Autoscaler v2 for KubeRay on AKS. By scaling pods vertically before scaling horizontally, IPPR lets multi-tenant clusters establish a smaller starting footprint and lean on better bin-packing during peak contention — yielding marginal but compounding efficiency gains in environments where operational details make "perfect" sizing impossible to predict up front.
+With [in-place pod resize](https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/) now GA in Kubernetes 1.35 and integrated with the Ray Autoscaler in Ray 2.56+, IPPR lets the Ray Autoscaler vertically resize running pods' CPU and memory to change cluster capacity — without restarting containers. By scaling pods vertically before scaling horizontally, IPPR lets multi-tenant clusters establish a smaller starting footprint and lean on better bin-packing during peak contention — yielding marginal but compounding efficiency gains in environments where operational details make "perfect" sizing impossible to predict up front.
 
 ## The cost of static sizing on AKS
 

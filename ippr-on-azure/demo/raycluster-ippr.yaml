@@ -15,7 +15,7 @@
 # so you never need all 3 nodes at full capacity simultaneously.
 #
 # Prerequisites:
-#   - AKS cluster running Kubernetes >= 1.33 (IPPR GA in 1.35)
+#   - AKS cluster running Kubernetes >= 1.35 (IPPR GA in 1.35)
 #   - KubeRay operator built from PR #55961 (autoscaler-ippr branch)
 #   - 3× Standard_D8s_v3 nodes (8 vCPU / 32 GiB each)
 ###############################################################################
