@@ -2,7 +2,7 @@
 
 Ray is one of the most widely adopted frameworks for distributed AI/ML workloads especially on AKS. As organizations scale their ML platforms, a common problem emerges where multiple teams sharing an AKS cluster for multitenant needs (serving, training, and batch inference) each have different resource needs that change throughout the day.
 
-With [in-place pod resize](https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/) now GA in Kubernetes 1.35, we are integrating vertical scaling capabilities into the Ray Autoscaler v2 for KubeRay on AKS. By scaling pods vertically before scaling horizontally, IPPR enables multi-tenant clusters to run the same workloads on fewer nodes with higher utilization.
+With [in-place pod resize](https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/) now GA in Kubernetes 1.35, we are integrating vertical scaling capabilities into the Ray Autoscaler v2 for KubeRay on AKS. By scaling pods vertically before scaling horizontally, IPPR lets multi-tenant clusters establish a smaller starting footprint and lean on better bin-packing during peak contention — yielding marginal but compounding efficiency gains in environments where operational details make "perfect" sizing impossible to predict up front.
 
 ## The cost of static sizing on AKS
 
@@ -25,9 +25,9 @@ On multi-tenant AKS clusters, serving and training workloads have naturally comp
 
 ![CPU Allocation by Workload Over 24 Hours](cpu_allocation_chart.png)
 
-Without IPPR, each workload must reserve its peak around the clock (Serving at 4, Training at 3, Batch at 3 giving a total of 10 CPU regardless of actual usage). With IPPR, resource allocation follows actual demand: Serving scales up during business hours while Training and Batch scale down, and overnight the pattern inverts. Because these workloads are naturally complementary, the cluster only needs enough capacity for the highest combined demand at any point in time — a peak of just 8 CPU. The shaded region shows the gap between what static sizing pays for and what the cluster actually needs.
+Without IPPR, each workload must reserve its peak around the clock (Serving at 4, Training at 3, Batch at 3 giving a total of 10 CPU regardless of actual usage). With IPPR, resource allocation follows actual demand: Serving scales up during business hours while Training and Batch scale down, and overnight the pattern inverts. Because these workloads are naturally complementary, the cluster only needs enough capacity for the highest combined demand at any point in time. The shaded region shows the gap between what static sizing pays for and what the cluster actually needs.
 
-Using [Standard_D8s_v3](https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/) nodes (8 vCPU, 32 GiB, ~$280/month each) as an example, static sizing requires 2 nodes to cover 10 CPU of peak reservations (~$561/month). With IPPR, the cluster peaks at 8 CPU and fits on 1 node (~$280/month) — a savings of ~$280/month (one full node) by letting resource allocation track demand instead of worst-case planning. At baseline (4.5 CPU), all pods fit on a single node. For enterprise customers running large multi-tenant Ray clusters, these per-cluster savings compound into meaningful reductions in monthly AKS spend.
+The magnitude of that gap is workload- and operator-dependent — real clusters rarely have neatly complementary curves, and "perfect" sizing is hard to predict in advance. The benefit IPPR delivers is therefore best framed as a marginal aggregate improvement: smaller starting requests give the Kubernetes scheduler more room to bin-pack, peak contention is absorbed by in-place growth rather than provisioning headroom, and any horizontal scale-out that does happen starts from a tighter baseline. Across a fleet of multi-tenant Ray clusters, those small wins compound into meaningful AKS spend reductions without requiring operators to architect for the perfect demand curve up front.
 
 ### Faster task scheduling through vertical scale-up
 
@@ -35,7 +35,9 @@ When the Ray Autoscaler detects pending tasks that cannot be placed on existing 
 
 ### Improved bin-packing and resource utilization
 
-IPPR-enabled pods start with smaller resource requests, allowing the Kubernetes scheduler to bin-pack more pods onto existing nodes. As workload demand grows, pods scale up in-place using available node capacity. This reduces fragmentation and improves overall node utilization compared to static sizing.
+The core mechanic is straightforward: different tenants sharing a node size up and down at different times. Serving's reservation can shrink overnight so Training's reservation can grow into the same node, and the pattern inverts during business hours. Because the Kubernetes scheduler bin-packs against *current* requests rather than a pod's maximum, IPPR makes that time-varying slack visible — slack that static sizing keeps permanently reserved and hidden behind worst-case requests.
+
+In practice, real workload curves aren't perfectly complementary and operators can't predict the "right" peak per tenant up front. So the gain from IPPR is best understood as a marginal aggregate improvement: each node holds a little less unused reservation, each scale-out is delayed a little longer, and each new pod lands on tighter starting requests. Per cluster the win is incremental; across a multi-tenant AKS fleet it compounds into real spend reduction without forcing anyone to architect for a demand pattern they can't actually predict.
 
 ### Zero-disruption resizing for stateful workloads
 
@@ -45,13 +47,13 @@ Unlike pod restarts or rolling updates, IPPR resizes containers without interrup
 - **Ray Train**: No lost training progress. Models mid-epoch retain their checkpoints and continue without interruption.
 - **Ray Data**: No broken pipeline stages. Batch jobs reading from Azure Blob Storage maintain their I/O state.
 
-### Reduced node count through smarter capacity planning
+### Smarter capacity planning
 
-When new worker pods are needed for IPPR-enabled groups, the autoscaler considers their maximum capacity during bin-packing decisions. A single new AKS node can host a pod that starts small and grows into its allocation, rather than requiring a node large enough for peak demand from the start.
+When new worker pods are needed for IPPR-enabled groups, the autoscaler considers their maximum capacity during bin-packing decisions. A single new AKS node can host a pod that starts small and grows into its allocation rather than reserving peak demand up front. Whether this translates into a measurably lower node count depends on the workload mix — but in the aggregate it consistently shifts the cluster toward fewer, better-utilized nodes.
 
 ## Looking Ahead
 
-By enabling the Ray Autoscaler v2 to vertically scale pods without restarting containers, IPPR lets serving, training, and batch workloads share cluster resources dynamically by starting small and growing only when demand requires it, and freeing capacity when ephemeral jobs complete. The result is fewer AKS nodes, higher utilization, and zero disruption to running workloads.
+By enabling the Ray Autoscaler v2 to vertically scale pods without restarting containers, IPPR lets serving, training, and batch workloads share cluster resources dynamically by starting small and growing only when demand requires it, and freeing capacity when ephemeral jobs complete. The result is a smaller starting footprint, better bin-packing during peak contention, and zero disruption to running workloads — marginal per-cluster improvements that compound into meaningful efficiency gains across a multi-tenant AKS fleet.
 
 As IPPR in KubeRay matures with capabilities like proactive downsizing (automatically shrinking pods when demand drops) and gradual resizing (stepping through intermediate allocations rather than jumping to max), new feature work will continue to unlock new ways for Kubernetes to deliver more efficient infrastructure for your AI/ML needs.
 
